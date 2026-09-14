@@ -1,0 +1,9 @@
+{
+  "id": "chat",
+  "name": "Chat",
+  "summary": "Room-oriented chat over the app API (pipe + framing; rooms later).",
+  "placement": "Room host on rank-1 SG when rooms land; agents on member devices.",
+  "os": "Linux (preview)",
+  "fabric_alias": "pnet-chat",
+  "notes": "Preview / skeleton. Not a full Discord-style product yet."
+}
