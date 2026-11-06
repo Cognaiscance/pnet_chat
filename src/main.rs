@@ -999,7 +999,7 @@ fn load_token(path: &str) -> Option<[u8; 16]> {
 
 fn save_token(path: &str, token: &[u8; 16]) {
     if let Err(e) = std::fs::write(path, token) {
-        eprintln!("[token] failed to save: {e}");
+        log::error!("[token] failed to save: {e}");
     }
 }
 
@@ -1019,7 +1019,7 @@ async fn register(ctrl: &UdpSocket, pnet_addr: SocketAddr, push_port: u16) -> Op
 
     let reply = &buf[..len];
     if reply.len() < 17 || reply[0] != STATUS_OK {
-        eprintln!("[register] failed: {:?}", &reply[..reply.len().min(4)]);
+        log::error!("[register] failed: {:?}", &reply[..reply.len().min(4)]);
         return None;
     }
     Some(reply[1..17].try_into().unwrap())
@@ -1037,13 +1037,13 @@ async fn fetch_data(ctrl: &UdpSocket, pnet_addr: SocketAddr, token: &[u8; 16], i
     )
     .await
     else {
-        eprintln!("[fetch_data] timeout or error");
+        log::error!("[fetch_data] timeout or error");
         return;
     };
 
     let reply = &buf[..len];
     if reply.is_empty() || reply[0] != STATUS_OK {
-        eprintln!("[fetch_data] bad reply: {:?}", &reply[..reply.len().min(4)]);
+        log::error!("[fetch_data] bad reply: {:?}", &reply[..reply.len().min(4)]);
         return;
     }
 
@@ -1077,7 +1077,7 @@ async fn push_receive_loop(state: Arc<AppState>) {
     loop {
         let (len, _) = match state.push_socket.recv_from(&mut buf).await {
             Ok(v) => v,
-            Err(e) => { eprintln!("[push_recv] {e}"); continue; }
+            Err(e) => { log::error!("[push_recv] {e}"); continue; }
         };
 
         let data = &buf[..len];
@@ -1115,7 +1115,7 @@ async fn push_receive_loop(state: Arc<AppState>) {
                 ),
             };
 
-            eprintln!("[recv] from {sender}: {kind} — {detail}");
+            log::error!("[recv] from {sender}: {kind} — {detail}");
             inner.log.push(LogEntry { sender, kind, detail, timestamp: now_secs() });
             inner.token
         };
@@ -2097,8 +2097,38 @@ async fn rh_retry_loop(state: Arc<AppState>) {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
+
+fn init_app_log(basename: &str) {
+    use std::sync::OnceLock;
+    static HANDLE: OnceLock<flexi_logger::LoggerHandle> = OnceLock::new();
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let dir = std::path::PathBuf::from(home).join(".pnet").join("logs");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let spec = flexi_logger::FileSpec::default()
+        .directory(dir)
+        .basename(basename)
+        .suffix("log");
+    let started = flexi_logger::Logger::try_with_str("info").and_then(|logger| {
+        logger
+            .log_to_file(spec)
+            .rotate(
+                flexi_logger::Criterion::AgeOrSize(flexi_logger::Age::Day, 32 * 1024 * 1024),
+                flexi_logger::Naming::Timestamps,
+                flexi_logger::Cleanup::KeepForDays(7),
+            )
+            .format(flexi_logger::detailed_format)
+            .start()
+    });
+    if let Ok(handle) = started {
+        let _ = HANDLE.set(handle);
+    }
+}
+
 #[tokio::main]
 async fn main() {
+    init_app_log("pnet-chat");
     let pnet_addr_str = std::env::var("PNET_ADDR").unwrap_or_else(|_| PNET_ADDR_DEFAULT.to_string());
     let pnet_addr: SocketAddr = tokio::net::lookup_host(&pnet_addr_str).await
         .unwrap_or_else(|e| panic!("invalid PNET_ADDR {pnet_addr_str:?}: {e}"))
@@ -2127,14 +2157,14 @@ async fn main() {
             .expect("failed to bind ctrl UDP socket"),
     );
 
-    eprintln!("[startup] pnet-chat: push port {push_port}, ctrl port {ctrl_port}");
+    log::error!("[startup] pnet-chat: push port {push_port}, ctrl port {ctrl_port}");
 
     const STARTUP_RETRIES: u32 = 4;
     const STARTUP_RETRY_DELAY_SECS: u64 = 2;
 
     // Try to reuse a saved token before registering fresh.
     let token = if let Some(saved) = load_token(&token_file) {
-        eprintln!("[startup] found saved token {}, verifying...", hex(&saved));
+        log::error!("[startup] found saved token {}, verifying...", hex(&saved));
         let inner_tmp = Mutex::new(Inner::new(Some(saved)));
         let mut verified = false;
         for attempt in 1..=STARTUP_RETRIES + 1 {
@@ -2144,23 +2174,23 @@ async fn main() {
                 break;
             }
             if attempt <= STARTUP_RETRIES {
-                eprintln!("[startup] fetch attempt {attempt} failed, retrying in {STARTUP_RETRY_DELAY_SECS}s...");
+                log::error!("[startup] fetch attempt {attempt} failed, retrying in {STARTUP_RETRY_DELAY_SECS}s...");
                 tokio::time::sleep(std::time::Duration::from_secs(STARTUP_RETRY_DELAY_SECS)).await;
             }
         }
         if verified {
-            eprintln!("[startup] saved token is valid");
+            log::error!("[startup] saved token is valid");
         } else {
-            eprintln!("[startup] could not reach pnet — will keep retrying in background");
-            eprintln!("[startup] if the token is invalid, delete {token_file} to re-register");
+            log::error!("[startup] could not reach pnet — will keep retrying in background");
+            log::error!("[startup] if the token is invalid, delete {token_file} to re-register");
         }
         saved
     } else {
-        eprintln!("[startup] no saved token, registering with pnet at {pnet_addr}...");
+        log::error!("[startup] no saved token, registering with pnet at {pnet_addr}...");
         match register(&ctrl_socket, pnet_addr, push_port).await {
-            Some(t) => { save_token(&token_file, &t); eprintln!("[startup] token = {}", hex(&t)); t }
+            Some(t) => { save_token(&token_file, &t); log::error!("[startup] token = {}", hex(&t)); t }
             None => {
-                eprintln!("[startup] registration failed — is pnet running on {pnet_addr}?");
+                log::error!("[startup] registration failed — is pnet running on {pnet_addr}?");
                 std::process::exit(1);
             }
         }
@@ -2177,9 +2207,9 @@ async fn main() {
 
     let approved = state.inner.lock().unwrap().app_info.as_ref().map(|a| a.approved).unwrap_or(false);
     if approved {
-        eprintln!("[startup] app is approved");
+        log::error!("[startup] app is approved");
     } else {
-        eprintln!("[startup] app is NOT approved — visit the pnet admin UI to approve it");
+        log::error!("[startup] app is NOT approved — visit the pnet admin UI to approve it");
     }
 
     tokio::spawn(push_receive_loop(state.clone()));
@@ -2204,7 +2234,7 @@ async fn main() {
         .await
         .expect("failed to bind HTTP port");
 
-    eprintln!("[startup] HTTP UI at http://127.0.0.1:{http_port}");
+    log::error!("[startup] HTTP UI at http://127.0.0.1:{http_port}");
     axum::serve(listener, app).await.unwrap();
 }
 
